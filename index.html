@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Video → GIF Converter</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="app__header">
+        <h1>Video → GIF</h1>
+        <p class="app__sub">
+          Convert any video to a GIF in your browser. Nothing leaves your machine.
+        </p>
+      </header>
+
+      <!-- Stage 1: load ffmpeg core (downloads ~31MB on first use) -->
+      <section id="stage-load" class="stage">
+        <button id="btn-load" class="btn btn--primary">Load converter (~31 MB)</button>
+        <p id="load-status" class="muted"></p>
+      </section>
+
+      <!-- Stage 2: pick a file -->
+      <section id="stage-pick" class="stage hidden">
+        <label id="dropzone" class="dropzone" for="file-input">
+          <span class="dropzone__title">Drop a video here</span>
+          <span class="dropzone__sub">or click to choose a file</span>
+          <input id="file-input" type="file" accept="video/*" hidden />
+        </label>
+      </section>
+
+      <!-- Stage 3: configure & convert -->
+      <section id="stage-convert" class="stage hidden">
+        <div class="grid">
+          <div class="panel">
+            <h2>Source</h2>
+            <video id="source-preview" controls muted playsinline></video>
+            <dl id="source-meta" class="meta"></dl>
+            <button id="btn-reset" class="btn btn--ghost">Pick a different file</button>
+          </div>
+
+          <div class="panel">
+            <h2>Options</h2>
+            <form id="options" class="options">
+              <label class="field">
+                <span>Width (px)</span>
+                <input type="number" name="width" min="40" max="1920" step="10" value="480" />
+              </label>
+
+              <label class="field">
+                <span>Frame rate (fps)</span>
+                <select name="fps">
+                  <option value="8">8</option>
+                  <option value="10">10</option>
+                  <option value="12">12</option>
+                  <option value="15" selected>15</option>
+                  <option value="20">20</option>
+                  <option value="24">24</option>
+                  <option value="30">30</option>
+                </select>
+              </label>
+
+              <label class="field">
+                <span>Quality</span>
+                <select name="quality">
+                  <option value="low">Low — fastest, smallest</option>
+                  <option value="medium" selected>Medium — balanced</option>
+                  <option value="high">High — palette + dither</option>
+                </select>
+              </label>
+
+              <label class="field">
+                <span>Dither</span>
+                <select name="dither">
+                  <option value="none">None</option>
+                  <option value="bayer">Bayer</option>
+                  <option value="sierra2_4a" selected>Sierra2 (4a)</option>
+                  <option value="floyd_steinberg">Floyd-Steinberg</option>
+                </select>
+              </label>
+
+              <label class="field">
+                <span>Start time (s)</span>
+                <input type="number" name="start" min="0" step="0.1" value="0" />
+              </label>
+
+              <label class="field">
+                <span>Duration (s, blank = full)</span>
+                <input type="number" name="duration" min="0.1" step="0.1" />
+              </label>
+
+              <label class="field">
+                <span>Loop</span>
+                <select name="loop">
+                  <option value="0" selected>Forever</option>
+                  <option value="1">Once</option>
+                  <option value="3">3 times</option>
+                  <option value="-1">No loop</option>
+                </select>
+              </label>
+
+              <label class="field">
+                <span>Max colors (palette)</span>
+                <select name="colors">
+                  <option value="64">64</option>
+                  <option value="128">128</option>
+                  <option value="256" selected>256</option>
+                </select>
+              </label>
+            </form>
+
+            <div class="actions">
+              <button id="btn-convert" class="btn btn--primary">Convert to GIF</button>
+              <button id="btn-cancel" class="btn btn--ghost hidden">Cancel</button>
+            </div>
+
+            <div id="progress" class="progress hidden">
+              <div class="progress__bar"><div id="progress-fill"></div></div>
+              <p id="progress-text" class="muted">Starting…</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Stage 4: result -->
+      <section id="stage-result" class="stage hidden">
+        <div class="panel">
+          <h2>Result</h2>
+          <img id="result-img" alt="Converted GIF" />
+          <dl id="result-meta" class="meta"></dl>
+          <div class="actions">
+            <a id="btn-download" class="btn btn--primary" download="output.gif">Download GIF</a>
+            <button id="btn-again" class="btn btn--ghost">Convert another</button>
+          </div>
+        </div>
+      </section>
+
+      <details class="logs">
+        <summary>ffmpeg log</summary>
+        <pre id="log"></pre>
+      </details>
+    </main>
+
+    <!-- ffmpeg.wasm UMD bundles are vendored locally so the worker chunk
+         (814.ffmpeg.js) is same-origin — browsers block cross-origin Workers
+         even with CORS. The big core .wasm still loads from the CDN. -->
+    <script src="vendor/ffmpeg.js"></script>
+    <script src="vendor/util.js"></script>
+    <script src="converter.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
