@@ -112,6 +112,10 @@ function selectFile(file) {
   show("convert");
 }
 
+// Cap calibration width to keep the sample fast (~1–2 s). Above ~320 px the
+// extra accuracy isn't worth the wait.
+const CALIBRATION_MAX_WIDTH = 320;
+
 async function calibrateContent(file) {
   if (!state.source) return;
   state.calibrating = true;
@@ -120,12 +124,18 @@ async function calibrateContent(file) {
   // Wait for ffmpeg to finish its background load before sampling.
   if (!state.converter.loaded) await state.converter.load();
 
-  // Sample: low-res, 4 frames spread across the first ~1 second. Keeps it
-  // under ~1s on most machines while giving a real measurement of the
-  // content's LZW + delta compressibility.
-  const sampleWidth = Math.min(160, state.source.width);
-  const sampleFps = 4;
-  const sampleDuration = Math.min(1.0, state.source.duration || 1.0);
+  // Sample at the user's *actual* fps and width (modulo the speed cap). This
+  // is what makes the estimate accurate for screen recordings: at low fps,
+  // each frame differs a lot from its neighbor, so per-frame bytes are high;
+  // at the user's real fps (e.g. 15), consecutive frames are nearly
+  // identical for static content and compress to near-nothing. The sample
+  // bpp at the user's fps matches the real conversion's bpp directly.
+  const opts = readOptions();
+  const sampleWidth = Math.min(opts.width || 480, CALIBRATION_MAX_WIDTH);
+  const sampleFps = opts.fps || 15;
+  // 2 s × fps gives enough frames (~30) that the first frame's full-encoding
+  // overhead is amortized rather than dominating the measurement.
+  const sampleDuration = Math.min(2.0, state.source.duration || 2.0);
 
   try {
     const result = await state.converter.convert(file, {
@@ -143,10 +153,31 @@ async function calibrateContent(file) {
     );
     const sampleFrames = Math.max(1, Math.round(sampleFps * sampleDuration));
     state.contentBpp = result.size / (sampleWidth * sampleHeight * sampleFrames);
+    state.calibrationSettings = { width: sampleWidth, fps: sampleFps };
   } finally {
     state.calibrating = false;
     updateEstimate();
   }
+}
+
+// Debounced recalibration when the user changes width or fps significantly.
+// We only recalibrate on those two options because they're what most affect
+// the measured bpp (resolution changes LZW efficiency, fps changes the
+// inter-frame delta cost).
+let recalibrationTimer = null;
+function scheduleRecalibration() {
+  clearTimeout(recalibrationTimer);
+  recalibrationTimer = setTimeout(() => {
+    if (!state.currentFile || !state.calibrationSettings) return;
+    const opts = readOptions();
+    const newSampleWidth = Math.min(opts.width || 480, CALIBRATION_MAX_WIDTH);
+    const last = state.calibrationSettings;
+    if (newSampleWidth !== last.width || opts.fps !== last.fps) {
+      state.calibrationPromise = calibrateContent(state.currentFile).catch(
+        (err) => console.warn("recalibration failed:", err),
+      );
+    }
+  }, 800);
 }
 
 els.btnReset.addEventListener("click", () => {
@@ -154,9 +185,15 @@ els.btnReset.addEventListener("click", () => {
   show("pick");
 });
 
-// Recompute the size estimate whenever any option changes.
-els.options.addEventListener("input", updateEstimate);
-els.options.addEventListener("change", updateEstimate);
+// Recompute the size estimate whenever any option changes; if width or fps
+// changes meaningfully, also kick off a fresh calibration in the background.
+els.options.addEventListener("input", onOptionChange);
+els.options.addEventListener("change", onOptionChange);
+
+function onOptionChange() {
+  updateEstimate();
+  scheduleRecalibration();
+}
 
 /**
  * GIF size estimate based on width × height × frames × bytes/pixel.
@@ -346,6 +383,7 @@ function resetSource() {
   state.contentBpp = null;
   state.calibrating = false;
   state.calibrationPromise = null;
+  state.calibrationSettings = null;
   if (els.sourcePreview.src) URL.revokeObjectURL(els.sourcePreview.src);
   els.sourcePreview.removeAttribute("src");
   els.fileInput.value = "";
