@@ -35,13 +35,10 @@ const state = {
   currentFile: null,
   currentResultUrl: null,
   source: null, // { width, height, duration } populated when a file is loaded
-  // Measured bytes-per-pixel for the current file. `contentBpp` is the mean
-  // across calibration windows; `Min`/`Max` are the per-window extremes used
-  // to show a range. All null while calibrating or on failure (we fall back
-  // to formula constants in that case).
+  // Measured bytes-per-pixel for the current file, set by a single
+  // long-window calibration after upload. Null while calibrating or on
+  // failure (we fall back to formula constants in that case).
   contentBpp: null,
-  contentBppMin: null,
-  contentBppMax: null,
   calibrating: false,
   calibrationPromise: null,
 };
@@ -139,49 +136,38 @@ async function calibrateContent(file) {
   const sampleWidth = Math.min(opts.width || 480, CALIBRATION_MAX_WIDTH);
   const sampleFps = opts.fps || 15;
 
-  // Long screen recordings can have very uneven motion across time (mostly
-  // static, then a burst of mouse movement, then static again). Sampling a
-  // single window over- or under-shoots depending on where it lands. We
-  // sample two short windows at 25 % and 75 % of the video instead, then
-  // average — much more representative of the average bpp across the whole
-  // clip while keeping calibration time bounded.
-  const sourceDur = state.source.duration || 2.0;
-  const perWindow = Math.min(1.0, sourceDur / 2.5);
-  const sampleStarts =
-    sourceDur < 2.5
-      ? [0]
-      : [
-          Math.max(0, sourceDur * 0.25 - perWindow / 2),
-          Math.max(0, sourceDur * 0.75 - perWindow / 2),
-        ];
-  const sampleDuration = perWindow;
+  // Single long sample from the middle of the video. Short samples
+  // overestimate bpp because (a) the GIF's first frame is fully encoded
+  // and (b) ffmpeg's encoder seems to extract more compression efficiency
+  // from longer streams (better palettes, frame-similarity detection). We
+  // sample as much as 8 s when resolution allows, capped by a 50 M
+  // pixel-frame budget that keeps calibration under ~5 s at any size.
+  const sourceDur = state.source.duration || 4.0;
+  const sampleHeight = Math.round(
+    sampleWidth * state.source.height / state.source.width,
+  );
+  const budgetDuration =
+    50_000_000 / (sampleWidth * sampleHeight * sampleFps);
+  const sampleDuration = Math.min(
+    sourceDur,
+    Math.max(2.0, Math.min(8.0, budgetDuration)),
+  );
+  const sampleStart = Math.max(0, (sourceDur - sampleDuration) / 2);
 
   try {
-    const sampleHeight = Math.round(
-      sampleWidth * state.source.height / state.source.width,
-    );
-    const framesPerWindow = Math.max(1, Math.round(sampleFps * sampleDuration));
-    const pixelsPerWindow = sampleWidth * sampleHeight * framesPerWindow;
-    let totalBytes = 0;
-    const perWindowBpp = [];
-    for (const sampleStart of sampleStarts) {
-      const result = await state.converter.convert(file, {
-        width: sampleWidth,
-        fps: sampleFps,
-        quality: opts.quality,
-        dither: opts.dither,
-        start: sampleStart,
-        duration: sampleDuration,
-        loop: 0,
-        colors: opts.colors,
-      });
-      totalBytes += result.size;
-      perWindowBpp.push(result.size / pixelsPerWindow);
-    }
-    const totalFrames = sampleStarts.length * framesPerWindow;
-    state.contentBpp = totalBytes / (sampleWidth * sampleHeight * totalFrames);
-    state.contentBppMin = Math.min(...perWindowBpp);
-    state.contentBppMax = Math.max(...perWindowBpp);
+    const sampleFrames = Math.max(1, Math.round(sampleFps * sampleDuration));
+    const result = await state.converter.convert(file, {
+      width: sampleWidth,
+      fps: sampleFps,
+      quality: opts.quality,
+      dither: opts.dither,
+      start: sampleStart,
+      duration: sampleDuration,
+      loop: 0,
+      colors: opts.colors,
+    });
+    state.contentBpp =
+      result.size / (sampleWidth * sampleHeight * sampleFrames);
     state.calibrationSettings = {
       width: sampleWidth,
       fps: sampleFps,
@@ -201,8 +187,19 @@ async function calibrateContent(file) {
 let recalibrationTimer = null;
 function scheduleRecalibration() {
   clearTimeout(recalibrationTimer);
-  recalibrationTimer = setTimeout(() => {
-    if (!state.currentFile || !state.calibrationSettings) return;
+  recalibrationTimer = setTimeout(async () => {
+    if (!state.currentFile) return;
+    // If the initial calibration is still in flight, wait for it before
+    // deciding whether to recalibrate — otherwise we'd compare against
+    // a null `calibrationSettings` and silently skip.
+    if (state.calibrationPromise) {
+      try {
+        await state.calibrationPromise;
+      } catch (_) {
+        /* non-fatal */
+      }
+    }
+    if (!state.calibrationSettings) return;
     const opts = readOptions();
     const newSampleWidth = Math.min(opts.width || 480, CALIBRATION_MAX_WIDTH);
     const last = state.calibrationSettings;
@@ -283,19 +280,15 @@ function updateEstimate() {
     return;
   }
 
-  // Show a range, not a single number — GIF size is content-dependent and
-  // a tight estimate can still miss the actual by 10–20 %. The range is
-  // ≥ ±10 % of the mean, widening further when the calibration windows
-  // disagreed (which signals content variability across the video).
+  // Show a range to convey that this is an estimate, not an exact value.
+  // ±20 % covers residual calibration error after sampling — empirically,
+  // long-sample calibration still tends to slightly overestimate because
+  // ffmpeg extracts more compression from a 440-frame stream than from
+  // even a 120-frame sample.
   let sizeStr;
   if (state.contentBpp != null) {
-    const mean = state.contentBpp;
-    const min = state.contentBppMin ?? mean;
-    const max = state.contentBppMax ?? mean;
-    const lowBpp = Math.min(mean * 0.9, min);
-    const highBpp = Math.max(mean * 1.1, max);
-    const lowBytes = (est.bytes * lowBpp) / mean;
-    const highBytes = (est.bytes * highBpp) / mean;
+    const lowBytes = est.bytes * 0.8;
+    const highBytes = est.bytes * 1.2;
     sizeStr = `<strong>${formatBytes(lowBytes)} – ${formatBytes(highBytes)}</strong>`;
   } else {
     sizeStr = `<strong>≈ ${formatBytes(est.bytes)}</strong>`;
@@ -418,8 +411,6 @@ function resetSource() {
   state.currentFile = null;
   state.source = null;
   state.contentBpp = null;
-  state.contentBppMin = null;
-  state.contentBppMax = null;
   state.calibrating = false;
   state.calibrationPromise = null;
   state.calibrationSettings = null;
