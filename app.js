@@ -124,12 +124,11 @@ async function calibrateContent(file) {
   // Wait for ffmpeg to finish its background load before sampling.
   if (!state.converter.loaded) await state.converter.load();
 
-  // Sample at the user's *actual* fps and width (modulo the speed cap). This
-  // is what makes the estimate accurate for screen recordings: at low fps,
-  // each frame differs a lot from its neighbor, so per-frame bytes are high;
-  // at the user's real fps (e.g. 15), consecutive frames are nearly
-  // identical for static content and compress to near-nothing. The sample
-  // bpp at the user's fps matches the real conversion's bpp directly.
+  // Sample at the user's *actual* settings — fps, quality, dither, and
+  // palette colors all materially affect bpp. Quality is the biggest
+  // factor: high (palettegen + paletteuse + dither) can produce ~4× the
+  // bytes per pixel of medium for static/screen content. Width is capped
+  // for speed; bpp scales approximately linearly with pixels.
   const opts = readOptions();
   const sampleWidth = Math.min(opts.width || 480, CALIBRATION_MAX_WIDTH);
   const sampleFps = opts.fps || 15;
@@ -141,29 +140,34 @@ async function calibrateContent(file) {
     const result = await state.converter.convert(file, {
       width: sampleWidth,
       fps: sampleFps,
-      quality: "medium",
-      dither: "sierra2_4a",
+      quality: opts.quality,
+      dither: opts.dither,
       start: 0,
       duration: sampleDuration,
       loop: 0,
-      colors: 256,
+      colors: opts.colors,
     });
     const sampleHeight = Math.round(
       sampleWidth * state.source.height / state.source.width,
     );
     const sampleFrames = Math.max(1, Math.round(sampleFps * sampleDuration));
     state.contentBpp = result.size / (sampleWidth * sampleHeight * sampleFrames);
-    state.calibrationSettings = { width: sampleWidth, fps: sampleFps };
+    state.calibrationSettings = {
+      width: sampleWidth,
+      fps: sampleFps,
+      quality: opts.quality,
+      dither: opts.dither,
+      colors: opts.colors,
+    };
   } finally {
     state.calibrating = false;
     updateEstimate();
   }
 }
 
-// Debounced recalibration when the user changes width or fps significantly.
-// We only recalibrate on those two options because they're what most affect
-// the measured bpp (resolution changes LZW efficiency, fps changes the
-// inter-frame delta cost).
+// Debounced recalibration when any option that affects bpp changes. Width
+// and fps change pixel/frame counts directly; quality, dither, and colors
+// each change the per-pixel byte cost.
 let recalibrationTimer = null;
 function scheduleRecalibration() {
   clearTimeout(recalibrationTimer);
@@ -172,7 +176,13 @@ function scheduleRecalibration() {
     const opts = readOptions();
     const newSampleWidth = Math.min(opts.width || 480, CALIBRATION_MAX_WIDTH);
     const last = state.calibrationSettings;
-    if (newSampleWidth !== last.width || opts.fps !== last.fps) {
+    const changed =
+      newSampleWidth !== last.width ||
+      opts.fps !== last.fps ||
+      opts.quality !== last.quality ||
+      opts.dither !== last.dither ||
+      opts.colors !== last.colors;
+    if (changed) {
       state.calibrationPromise = calibrateContent(state.currentFile).catch(
         (err) => console.warn("recalibration failed:", err),
       );
@@ -214,40 +224,20 @@ function estimateGifBytes(source, opts, contentBpp) {
   if (clipDuration <= 0) return null;
   const frames = Math.max(1, Math.round(opts.fps * clipDuration));
 
-  // Base bpp: measured value (anchored to medium quality + sierra2_4a + 256
-  // colors, since that's how we calibrate) or fallback constants.
-  const baseBpp =
-    contentBpp != null
-      ? contentBpp
-      : opts.quality === "high"
-        ? 0.40
-        : opts.quality === "low"
-          ? 0.32
-          : 0.45;
+  // When we have a calibrated bpp, it was measured at the user's actual
+  // quality/dither/colors — no additional factors needed.
+  if (contentBpp != null) {
+    const bytes = outW * outH * frames * contentBpp;
+    return { bytes, outW, outH, frames };
+  }
 
-  // Relative adjustments from the calibration baseline. These are small —
-  // quality / dither / palette have modest impact compared to content type.
-  const qualityFactor =
-    contentBpp != null
-      ? opts.quality === "high"
-        ? 0.90
-        : opts.quality === "low"
-          ? 0.85
-          : 1.0
-      : 1.0;
-  const ditherFactor =
-    opts.dither && opts.dither !== "none"
-      ? contentBpp != null
-        ? 1.0
-        : 1.10
-      : contentBpp != null
-        ? 0.90
-        : 1.0;
+  // Fallback used in the brief window before calibration completes.
+  const baseBpp =
+    opts.quality === "high" ? 0.40 : opts.quality === "low" ? 0.32 : 0.45;
+  const ditherFactor = opts.dither && opts.dither !== "none" ? 1.10 : 1.0;
   const paletteFactor =
     opts.colors >= 256 ? 1.0 : opts.colors >= 128 ? 0.93 : 0.85;
-
-  const bytes =
-    outW * outH * frames * baseBpp * qualityFactor * ditherFactor * paletteFactor;
+  const bytes = outW * outH * frames * baseBpp * ditherFactor * paletteFactor;
   return { bytes, outW, outH, frames };
 }
 
