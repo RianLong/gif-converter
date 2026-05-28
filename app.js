@@ -280,22 +280,29 @@ function updateEstimate() {
     return;
   }
 
-  // Show a range to convey that this is an estimate, not an exact value.
-  // ±20 % covers residual calibration error after sampling — empirically,
-  // long-sample calibration still tends to slightly overestimate because
+  const dimsStr = `${est.outW}×${est.outH}, ${est.frames} frames`;
+
+  // While calibrating with no measurement yet, the formula-based fallback
+  // can be very wrong — better to hide it and explain what's happening.
+  if (state.contentBpp == null) {
+    if (state.calibrating) {
+      els.estimate.innerHTML =
+        `<span class="muted">Calibrating estimated output size…</span> · ${dimsStr}`;
+    } else {
+      els.estimate.innerHTML = `Estimated output: — · ${dimsStr}`;
+    }
+    return;
+  }
+
+  // ±20 % range covers residual calibration error — empirically, long-
+  // sample calibration still tends to slightly overestimate because
   // ffmpeg extracts more compression from a 440-frame stream than from
   // even a 120-frame sample.
-  let sizeStr;
-  if (state.contentBpp != null) {
-    const lowBytes = est.bytes * 0.8;
-    const highBytes = est.bytes * 1.2;
-    sizeStr = `<strong>${formatBytes(lowBytes)} – ${formatBytes(highBytes)}</strong>`;
-  } else {
-    sizeStr = `<strong>≈ ${formatBytes(est.bytes)}</strong>`;
-  }
-  const dimsStr = `${est.outW}×${est.outH}, ${est.frames} frames`;
+  const lowBytes = est.bytes * 0.8;
+  const highBytes = est.bytes * 1.2;
+  const sizeStr = `<strong>${formatBytes(lowBytes)} – ${formatBytes(highBytes)}</strong>`;
   const suffix = state.calibrating
-    ? ' <span class="muted">(calibrating…)</span>'
+    ? ' <span class="muted">(updating…)</span>'
     : "";
   els.estimate.innerHTML = `Estimated output: ${sizeStr} · ${dimsStr}${suffix}`;
 }
