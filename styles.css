@@ -156,8 +156,17 @@ html, body {
   border-color: var(--accent);
 }
 
+.estimate {
+  margin: 14px 0 0;
+  font-size: 13px;
+}
+.estimate strong {
+  color: var(--text);
+  font-weight: 500;
+}
+
 .actions {
-  margin-top: 16px;
+  margin-top: 10px;
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
