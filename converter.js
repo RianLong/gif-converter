@@ -10,17 +10,24 @@ class GifConverter {
     this.ffmpeg = null;
     this.loaded = false;
     this.handlers = { log: () => {}, progress: () => {} };
+    this._loadPromise = null;
   }
 
   on(event, handler) {
     this.handlers[event] = handler;
   }
 
-  async load() {
-    if (this.loaded) return;
+  // Idempotent and safe to call concurrently — repeated calls share the same
+  // in-flight promise. Lets us kick off load() on page open and also `await`
+  // it from the convert handler without double-loading.
+  load() {
+    if (this.loaded) return Promise.resolve();
+    if (!this._loadPromise) this._loadPromise = this._doLoad();
+    return this._loadPromise;
+  }
 
+  async _doLoad() {
     const { FFmpeg } = FFmpegWASM;
-    const { toBlobURL } = FFmpegUtil;
 
     this.ffmpeg = new FFmpeg();
     this.ffmpeg.on("log", ({ message }) => this.handlers.log(message));
@@ -49,6 +56,7 @@ class GifConverter {
     }
     this.ffmpeg = null;
     this.loaded = false;
+    this._loadPromise = null;
   }
 
   /**

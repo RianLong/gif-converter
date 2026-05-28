@@ -5,15 +5,12 @@
 const $ = (id) => document.getElementById(id);
 
 const stages = {
-  load: $("stage-load"),
   pick: $("stage-pick"),
   convert: $("stage-convert"),
   result: $("stage-result"),
 };
 
 const els = {
-  btnLoad: $("btn-load"),
-  loadStatus: $("load-status"),
   dropzone: $("dropzone"),
   fileInput: $("file-input"),
   sourcePreview: $("source-preview"),
@@ -46,21 +43,14 @@ state.converter.on("progress", ({ progress }) => {
   if (progress >= 0 && progress <= 1) setProgress(progress);
 });
 
-// -- Stage 1: load ffmpeg ---------------------------------------------------
-
-els.btnLoad.addEventListener("click", async () => {
-  els.btnLoad.disabled = true;
-  els.loadStatus.textContent = "Downloading ffmpeg core…";
-  try {
-    await state.converter.load();
-    show("pick");
-  } catch (err) {
-    els.loadStatus.textContent = "Failed to load: " + err.message;
-    els.btnLoad.disabled = false;
-  }
+// Kick off the ffmpeg core download immediately so it's usually ready by the
+// time the user picks a file. Errors are recorded for the convert handler to
+// surface — we don't block the dropzone on this.
+state.converter.load().catch((err) => {
+  state.loadError = err;
 });
 
-// -- Stage 2: pick a file ---------------------------------------------------
+// -- Stage 1: pick a file ---------------------------------------------------
 
 els.fileInput.addEventListener("change", (e) => {
   const file = e.target.files && e.target.files[0];
@@ -104,15 +94,25 @@ els.btnReset.addEventListener("click", () => {
   show("pick");
 });
 
-// -- Stage 3: convert -------------------------------------------------------
+// -- Stage 2: convert -------------------------------------------------------
 
 els.btnConvert.addEventListener("click", async () => {
   if (!state.currentFile) return;
+  if (state.loadError) {
+    els.progressText.textContent = "Converter failed to load: " + state.loadError.message;
+    els.progress.classList.remove("hidden");
+    return;
+  }
   const opts = readOptions();
   startProgress();
   els.btnConvert.disabled = true;
   els.btnCancel.classList.remove("hidden");
   try {
+    // If the background load() is still running, this awaits it.
+    if (!state.converter.loaded) {
+      els.progressText.textContent = "Preparing converter (~31 MB)…";
+      await state.converter.load();
+    }
     const result = await state.converter.convert(state.currentFile, opts);
     showResult(result);
   } catch (err) {
@@ -163,7 +163,7 @@ function setProgress(p) {
   els.progressText.textContent = pct.toFixed(0) + "%";
 }
 
-// -- Stage 4: result --------------------------------------------------------
+// -- Stage 3: result --------------------------------------------------------
 
 function showResult({ blob, size, durationMs }) {
   if (state.currentResultUrl) URL.revokeObjectURL(state.currentResultUrl);

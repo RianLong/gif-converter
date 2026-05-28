@@ -15,14 +15,10 @@
         </p>
       </header>
 
-      <!-- Stage 1: load ffmpeg core (downloads ~31MB on first use) -->
-      <section id="stage-load" class="stage">
-        <button id="btn-load" class="btn btn--primary">Load converter (~31 MB)</button>
-        <p id="load-status" class="muted"></p>
-      </section>
-
-      <!-- Stage 2: pick a file -->
-      <section id="stage-pick" class="stage hidden">
+      <!-- Stage 1: pick a file. The ffmpeg core downloads in the background as
+           soon as the page opens; if it isn't ready by the time the user
+           clicks Convert, that step waits. -->
+      <section id="stage-pick" class="stage">
         <label id="dropzone" class="dropzone" for="file-input">
           <span class="dropzone__title">Drop a video here</span>
           <span class="dropzone__sub">or click to choose a file</span>
