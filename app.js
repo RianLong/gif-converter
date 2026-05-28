@@ -35,10 +35,13 @@ const state = {
   currentFile: null,
   currentResultUrl: null,
   source: null, // { width, height, duration } populated when a file is loaded
-  // Measured bytes-per-pixel for the current file. Set by a small calibration
-  // convert after upload; null while calibrating or on failure (we fall back
+  // Measured bytes-per-pixel for the current file. `contentBpp` is the mean
+  // across calibration windows; `Min`/`Max` are the per-window extremes used
+  // to show a range. All null while calibrating or on failure (we fall back
   // to formula constants in that case).
   contentBpp: null,
+  contentBppMin: null,
+  contentBppMax: null,
   calibrating: false,
   calibrationPromise: null,
 };
@@ -154,7 +157,13 @@ async function calibrateContent(file) {
   const sampleDuration = perWindow;
 
   try {
+    const sampleHeight = Math.round(
+      sampleWidth * state.source.height / state.source.width,
+    );
+    const framesPerWindow = Math.max(1, Math.round(sampleFps * sampleDuration));
+    const pixelsPerWindow = sampleWidth * sampleHeight * framesPerWindow;
     let totalBytes = 0;
+    const perWindowBpp = [];
     for (const sampleStart of sampleStarts) {
       const result = await state.converter.convert(file, {
         width: sampleWidth,
@@ -167,13 +176,12 @@ async function calibrateContent(file) {
         colors: opts.colors,
       });
       totalBytes += result.size;
+      perWindowBpp.push(result.size / pixelsPerWindow);
     }
-    const sampleHeight = Math.round(
-      sampleWidth * state.source.height / state.source.width,
-    );
-    const framesPerWindow = Math.max(1, Math.round(sampleFps * sampleDuration));
     const totalFrames = sampleStarts.length * framesPerWindow;
     state.contentBpp = totalBytes / (sampleWidth * sampleHeight * totalFrames);
+    state.contentBppMin = Math.min(...perWindowBpp);
+    state.contentBppMax = Math.max(...perWindowBpp);
     state.calibrationSettings = {
       width: sampleWidth,
       fps: sampleFps,
@@ -274,7 +282,24 @@ function updateEstimate() {
     els.estimate.innerHTML = "Estimated output: —";
     return;
   }
-  const sizeStr = `<strong>≈ ${formatBytes(est.bytes)}</strong>`;
+
+  // Show a range, not a single number — GIF size is content-dependent and
+  // a tight estimate can still miss the actual by 10–20 %. The range is
+  // ≥ ±10 % of the mean, widening further when the calibration windows
+  // disagreed (which signals content variability across the video).
+  let sizeStr;
+  if (state.contentBpp != null) {
+    const mean = state.contentBpp;
+    const min = state.contentBppMin ?? mean;
+    const max = state.contentBppMax ?? mean;
+    const lowBpp = Math.min(mean * 0.9, min);
+    const highBpp = Math.max(mean * 1.1, max);
+    const lowBytes = (est.bytes * lowBpp) / mean;
+    const highBytes = (est.bytes * highBpp) / mean;
+    sizeStr = `<strong>${formatBytes(lowBytes)} – ${formatBytes(highBytes)}</strong>`;
+  } else {
+    sizeStr = `<strong>≈ ${formatBytes(est.bytes)}</strong>`;
+  }
   const dimsStr = `${est.outW}×${est.outH}, ${est.frames} frames`;
   const suffix = state.calibrating
     ? ' <span class="muted">(calibrating…)</span>'
@@ -393,6 +418,8 @@ function resetSource() {
   state.currentFile = null;
   state.source = null;
   state.contentBpp = null;
+  state.contentBppMin = null;
+  state.contentBppMax = null;
   state.calibrating = false;
   state.calibrationPromise = null;
   state.calibrationSettings = null;
