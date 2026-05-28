@@ -117,11 +117,24 @@ html, body {
 .dropzone__sub { color: var(--muted); font-size: 13px; }
 
 /* Media previews */
-#source-preview,
-#result-img {
+#source-preview {
   display: block;
   width: 100%;
   max-height: 320px;
+  object-fit: contain;
+  background: #000;
+  border-radius: 8px;
+  margin-bottom: 12px;
+}
+
+/* The result panel spans the full app width (no sibling), so the GIF can be
+   shown much larger than the source preview. Cap by viewport height so it
+   doesn't push the download button off-screen on small displays. */
+#result-img {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 80vh;
   object-fit: contain;
   background: #000;
   border-radius: 8px;
