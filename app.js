@@ -112,9 +112,12 @@ function selectFile(file) {
   show("convert");
 }
 
-// Cap calibration width to keep the sample fast (~1–2 s). Above ~320 px the
-// extra accuracy isn't worth the wait.
-const CALIBRATION_MAX_WIDTH = 320;
+// Calibration width cap. We want to sample near the user's actual output
+// width because per-pixel bpp varies with resolution for dithered/animated
+// content (smaller frames have less LZW context, so bpp is ~30–40% higher
+// at 320 px than at 1080 px for the same content). Cap at 1080 to keep
+// calibration time bounded for huge output requests.
+const CALIBRATION_MAX_WIDTH = 1080;
 
 async function calibrateContent(file) {
   if (!state.source) return;
@@ -132,26 +135,45 @@ async function calibrateContent(file) {
   const opts = readOptions();
   const sampleWidth = Math.min(opts.width || 480, CALIBRATION_MAX_WIDTH);
   const sampleFps = opts.fps || 15;
-  // 2 s × fps gives enough frames (~30) that the first frame's full-encoding
-  // overhead is amortized rather than dominating the measurement.
-  const sampleDuration = Math.min(2.0, state.source.duration || 2.0);
+
+  // Long screen recordings can have very uneven motion across time (mostly
+  // static, then a burst of mouse movement, then static again). Sampling a
+  // single window over- or under-shoots depending on where it lands. We
+  // sample two short windows at 25 % and 75 % of the video instead, then
+  // average — much more representative of the average bpp across the whole
+  // clip while keeping calibration time bounded.
+  const sourceDur = state.source.duration || 2.0;
+  const perWindow = Math.min(1.0, sourceDur / 2.5);
+  const sampleStarts =
+    sourceDur < 2.5
+      ? [0]
+      : [
+          Math.max(0, sourceDur * 0.25 - perWindow / 2),
+          Math.max(0, sourceDur * 0.75 - perWindow / 2),
+        ];
+  const sampleDuration = perWindow;
 
   try {
-    const result = await state.converter.convert(file, {
-      width: sampleWidth,
-      fps: sampleFps,
-      quality: opts.quality,
-      dither: opts.dither,
-      start: 0,
-      duration: sampleDuration,
-      loop: 0,
-      colors: opts.colors,
-    });
+    let totalBytes = 0;
+    for (const sampleStart of sampleStarts) {
+      const result = await state.converter.convert(file, {
+        width: sampleWidth,
+        fps: sampleFps,
+        quality: opts.quality,
+        dither: opts.dither,
+        start: sampleStart,
+        duration: sampleDuration,
+        loop: 0,
+        colors: opts.colors,
+      });
+      totalBytes += result.size;
+    }
     const sampleHeight = Math.round(
       sampleWidth * state.source.height / state.source.width,
     );
-    const sampleFrames = Math.max(1, Math.round(sampleFps * sampleDuration));
-    state.contentBpp = result.size / (sampleWidth * sampleHeight * sampleFrames);
+    const framesPerWindow = Math.max(1, Math.round(sampleFps * sampleDuration));
+    const totalFrames = sampleStarts.length * framesPerWindow;
+    state.contentBpp = totalBytes / (sampleWidth * sampleHeight * totalFrames);
     state.calibrationSettings = {
       width: sampleWidth,
       fps: sampleFps,
