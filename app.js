@@ -35,6 +35,12 @@ const state = {
   currentFile: null,
   currentResultUrl: null,
   source: null, // { width, height, duration } populated when a file is loaded
+  // Measured bytes-per-pixel for the current file. Set by a small calibration
+  // convert after upload; null while calibrating or on failure (we fall back
+  // to formula constants in that case).
+  contentBpp: null,
+  calibrating: false,
+  calibrationPromise: null,
 };
 
 state.converter.on("log", (msg) => {
@@ -75,6 +81,7 @@ els.dropzone.addEventListener("drop", (e) => {
 
 function selectFile(file) {
   state.currentFile = file;
+  state.contentBpp = null;
   const url = URL.createObjectURL(file);
   els.sourcePreview.src = url;
   els.sourcePreview.onloadedmetadata = () => {
@@ -95,8 +102,51 @@ function selectFile(file) {
       Dimensions: `${state.source.width} × ${state.source.height}`,
     });
     updateEstimate();
+    // Kick off a tiny convert in the background to measure how compressible
+    // this specific content is. Errors are non-fatal — we just fall back to
+    // the formula constants.
+    state.calibrationPromise = calibrateContent(file).catch((err) => {
+      console.warn("calibration failed:", err);
+    });
   };
   show("convert");
+}
+
+async function calibrateContent(file) {
+  if (!state.source) return;
+  state.calibrating = true;
+  updateEstimate();
+
+  // Wait for ffmpeg to finish its background load before sampling.
+  if (!state.converter.loaded) await state.converter.load();
+
+  // Sample: low-res, 4 frames spread across the first ~1 second. Keeps it
+  // under ~1s on most machines while giving a real measurement of the
+  // content's LZW + delta compressibility.
+  const sampleWidth = Math.min(160, state.source.width);
+  const sampleFps = 4;
+  const sampleDuration = Math.min(1.0, state.source.duration || 1.0);
+
+  try {
+    const result = await state.converter.convert(file, {
+      width: sampleWidth,
+      fps: sampleFps,
+      quality: "medium",
+      dither: "sierra2_4a",
+      start: 0,
+      duration: sampleDuration,
+      loop: 0,
+      colors: 256,
+    });
+    const sampleHeight = Math.round(
+      sampleWidth * state.source.height / state.source.width,
+    );
+    const sampleFrames = Math.max(1, Math.round(sampleFps * sampleDuration));
+    state.contentBpp = result.size / (sampleWidth * sampleHeight * sampleFrames);
+  } finally {
+    state.calibrating = false;
+    updateEstimate();
+  }
 }
 
 els.btnReset.addEventListener("click", () => {
@@ -109,11 +159,13 @@ els.options.addEventListener("input", updateEstimate);
 els.options.addEventListener("change", updateEstimate);
 
 /**
- * Rough GIF size estimate based on width × height × frames × bytes/pixel.
- * Real GIF size depends heavily on content (LZW + inter-frame delta), so
- * this is a directional indicator, not a guarantee — typically within ~2x.
+ * GIF size estimate based on width × height × frames × bytes/pixel.
+ * When we've measured a calibration bpp for this file, we use that directly
+ * (much more accurate). Otherwise we fall back to content-agnostic constants
+ * that assume photo-realistic content — these can be 20× off for screen
+ * recordings or cartoon-like material.
  */
-function estimateGifBytes(source, opts) {
+function estimateGifBytes(source, opts, contentBpp) {
   if (!source) return null;
   const aspect = source.height / source.width;
   const outW = Math.max(1, opts.width);
@@ -125,20 +177,40 @@ function estimateGifBytes(source, opts) {
   if (clipDuration <= 0) return null;
   const frames = Math.max(1, Math.round(opts.fps * clipDuration));
 
-  // Empirical bytes-per-pixel for typical photo-realistic content,
-  // calibrated against real conversions (~0.5 bpp for medium quality with
-  // default dither). Real GIF size varies a lot with content — flat/cartoon
-  // material can be 3–5x smaller than the estimate.
-  const bpp =
-    opts.quality === "high" ? 0.40 : opts.quality === "low" ? 0.32 : 0.45;
+  // Base bpp: measured value (anchored to medium quality + sierra2_4a + 256
+  // colors, since that's how we calibrate) or fallback constants.
+  const baseBpp =
+    contentBpp != null
+      ? contentBpp
+      : opts.quality === "high"
+        ? 0.40
+        : opts.quality === "low"
+          ? 0.32
+          : 0.45;
 
-  // Dithering adds high-frequency noise that LZW can't compress as well.
-  const ditherFactor = opts.dither && opts.dither !== "none" ? 1.10 : 1.0;
+  // Relative adjustments from the calibration baseline. These are small —
+  // quality / dither / palette have modest impact compared to content type.
+  const qualityFactor =
+    contentBpp != null
+      ? opts.quality === "high"
+        ? 0.90
+        : opts.quality === "low"
+          ? 0.85
+          : 1.0
+      : 1.0;
+  const ditherFactor =
+    opts.dither && opts.dither !== "none"
+      ? contentBpp != null
+        ? 1.0
+        : 1.10
+      : contentBpp != null
+        ? 0.90
+        : 1.0;
+  const paletteFactor =
+    opts.colors >= 256 ? 1.0 : opts.colors >= 128 ? 0.93 : 0.85;
 
-  // Smaller palettes shrink the file marginally.
-  const paletteFactor = opts.colors >= 256 ? 1.0 : opts.colors >= 128 ? 0.93 : 0.85;
-
-  const bytes = outW * outH * frames * bpp * ditherFactor * paletteFactor;
+  const bytes =
+    outW * outH * frames * baseBpp * qualityFactor * ditherFactor * paletteFactor;
   return { bytes, outW, outH, frames };
 }
 
@@ -148,14 +220,17 @@ function updateEstimate() {
     return;
   }
   const opts = readOptions();
-  const est = estimateGifBytes(state.source, opts);
+  const est = estimateGifBytes(state.source, opts, state.contentBpp);
   if (!est) {
     els.estimate.innerHTML = "Estimated output: —";
     return;
   }
-  els.estimate.innerHTML =
-    `Estimated output: <strong>≈ ${formatBytes(est.bytes)}</strong> · ` +
-    `${est.outW}×${est.outH}, ${est.frames} frames`;
+  const sizeStr = `<strong>≈ ${formatBytes(est.bytes)}</strong>`;
+  const dimsStr = `${est.outW}×${est.outH}, ${est.frames} frames`;
+  const suffix = state.calibrating
+    ? ' <span class="muted">(calibrating…)</span>'
+    : "";
+  els.estimate.innerHTML = `Estimated output: ${sizeStr} · ${dimsStr}${suffix}`;
 }
 
 // -- Stage 2: convert -------------------------------------------------------
@@ -176,6 +251,16 @@ els.btnConvert.addEventListener("click", async () => {
     if (!state.converter.loaded) {
       els.progressText.textContent = "Preparing converter (~31 MB)…";
       await state.converter.load();
+    }
+    // Calibration shares the single ffmpeg worker — wait for it to finish
+    // so the real convert can run cleanly. Adds at most ~1s.
+    if (state.calibrationPromise) {
+      els.progressText.textContent = "Finishing calibration…";
+      try {
+        await state.calibrationPromise;
+      } catch (_) {
+        /* non-fatal */
+      }
     }
     const result = await state.converter.convert(state.currentFile, opts);
     showResult(result);
@@ -258,6 +343,9 @@ function show(stageName) {
 function resetSource() {
   state.currentFile = null;
   state.source = null;
+  state.contentBpp = null;
+  state.calibrating = false;
+  state.calibrationPromise = null;
   if (els.sourcePreview.src) URL.revokeObjectURL(els.sourcePreview.src);
   els.sourcePreview.removeAttribute("src");
   els.fileInput.value = "";
