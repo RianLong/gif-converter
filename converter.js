@@ -3,7 +3,12 @@
 // options object. The UI layer (app.js) is responsible for collecting options
 // and rendering progress; this file owns ffmpeg interaction.
 
-const FFMPEG_CORE_BASE = "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd";
+// Vendored locally so no third-party CDN is contacted at runtime — the page
+// only fetches assets from its own origin. Privacy guarantee: user video data
+// is never transmitted anywhere; ffmpeg runs entirely in the browser.
+// Absolute URL so the ffmpeg worker (a blob URL with no document base) can
+// still resolve the path.
+const FFMPEG_CORE_BASE = new URL("./vendor", document.baseURI).href;
 
 class GifConverter {
   constructor() {
